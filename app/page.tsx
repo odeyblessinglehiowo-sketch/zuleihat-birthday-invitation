@@ -71,7 +71,7 @@ export default function Home() {
     <main className="invitation-page">
       <audio
         ref={audioRef}
-        src="/music/birthday-song.mp3"
+        src="/music/birthday-song1.mp3"
         loop
         preload="auto"
       />
