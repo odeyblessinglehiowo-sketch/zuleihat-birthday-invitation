@@ -90,7 +90,7 @@ export default function Gifts() {
                   You can send your gift using the details below.
                 </p>
 
-                <div className="mt-5 space-y-2 text-md leading-7 text-black">
+                <div className="mt-4 space-y-2 text-md leading-7 text-black">
                   <p>
                     <span className="font-semibold">Account Name:</span>{" "}
                     Yusuf Oyarazi Zuleihat
