@@ -13,6 +13,9 @@ const FROM_EMAIL =
 const RSVP_RECEIVER_EMAIL =
   process.env.RSVP_RECEIVER_EMAIL?.trim();
 
+const TOTAL_TABLES = 15;
+const SEATS_PER_TABLE = 4;
+
 function escapeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -103,16 +106,36 @@ export async function POST(request: Request) {
     const guestsBringing = Number(body.guestsBringing ?? 0);
     const message = String(body.message ?? "").trim();
 
-    if (!fullName || !email || !attendance) {
+    /*
+     * Required field validation
+     */
+    if (!fullName || !email || !attendance || !message) {
       return NextResponse.json(
         {
           success: false,
-          message: "Please complete all required fields.",
+          message:
+            "Please complete all required fields, including your birthday message.",
         },
         { status: 400 }
       );
     }
 
+    /*
+     * Birthday message validation
+     */
+    if (message.length < 2) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Please enter a meaningful birthday message.",
+        },
+        { status: 400 }
+      );
+    }
+
+    /*
+     * Email validation
+     */
     const emailIsValid =
       /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
@@ -126,6 +149,9 @@ export async function POST(request: Request) {
       );
     }
 
+    /*
+     * Attendance validation
+     */
     if (
       attendance !== "ATTENDING" &&
       attendance !== "NOT_ATTENDING"
@@ -139,16 +165,26 @@ export async function POST(request: Request) {
       );
     }
 
+    /*
+     * A table has 4 seats:
+     *
+     * Guest alone = 1 person
+     * Guest + 1 = 2 people
+     * Guest + 2 = 3 people
+     * Guest + 3 = 4 people
+     *
+     * Therefore, guestsBringing cannot exceed 3.
+     */
     if (
       !Number.isInteger(guestsBringing) ||
       guestsBringing < 0 ||
-      guestsBringing > 5
+      guestsBringing > SEATS_PER_TABLE - 1
     ) {
       return NextResponse.json(
         {
           success: false,
           message:
-            "The number of guests must be between 0 and 5.",
+            "You can bring a maximum of 3 additional guests, making 4 people in total.",
         },
         { status: 400 }
       );
@@ -165,71 +201,97 @@ export async function POST(request: Request) {
       ? safeGuestsBringing + 1
       : 0;
 
+    /*
+     * Extra safety check.
+     */
+    if (
+      isAttending &&
+      totalPartySize > SEATS_PER_TABLE
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Each table has a maximum capacity of 4 people.",
+        },
+        { status: 400 }
+      );
+    }
+
     let allocatedTable: number | null = null;
 
     /*
-      A table is only allocated when the guest is attending
-      and bringing at least one additional person.
-    */
+     * A table is allocated when the guest is attending
+     * and bringing at least one additional person.
+     *
+     * Guests attending alone will be confirmed without
+     * a table allocation under the current system.
+     */
     if (isAttending && safeGuestsBringing > 0) {
       allocatedTable = await prisma.$transaction(
-  async (transaction) => {
-    const availableTables =
-      await transaction.birthdayTable.findMany({
-        where: {
-          capacity: {
-            gte: totalPartySize,
-          },
-          occupiedSeats: {
-            lte: 6 - totalPartySize,
-          },
+        async (transaction) => {
+          const availableTables =
+            await transaction.birthdayTable.findMany({
+              where: {
+                tableNumber: {
+                  gte: 1,
+                  lte: TOTAL_TABLES,
+                },
+                capacity: {
+                  gte: totalPartySize,
+                },
+                occupiedSeats: {
+                  lte: SEATS_PER_TABLE - totalPartySize,
+                },
+              },
+              select: {
+                tableNumber: true,
+              },
+            });
+
+          if (availableTables.length === 0) {
+            throw new Error("NO_TABLE_AVAILABLE");
+          }
+
+          const randomizedTables = shuffleNumbers(
+            availableTables.map(
+              (table) => table.tableNumber
+            )
+          );
+
+          for (const tableNumber of randomizedTables) {
+            const updatedTable =
+              await transaction.birthdayTable.updateMany({
+                where: {
+                  tableNumber,
+                  occupiedSeats: {
+                    lte: SEATS_PER_TABLE - totalPartySize,
+                  },
+                },
+                data: {
+                  occupiedSeats: {
+                    increment: totalPartySize,
+                  },
+                },
+              });
+
+            if (updatedTable.count === 1) {
+              return tableNumber;
+            }
+          }
+
+          throw new Error("NO_TABLE_AVAILABLE");
         },
-        select: {
-          tableNumber: true,
-        },
-      });
-
-    if (availableTables.length === 0) {
-      throw new Error("NO_TABLE_AVAILABLE");
+        {
+          maxWait: 15000,
+          timeout: 30000,
+        }
+      );
     }
 
-    const randomizedTables = shuffleNumbers(
-      availableTables.map(
-        (table) => table.tableNumber
-      )
-    );
-
-    for (const tableNumber of randomizedTables) {
-      const updatedTable =
-        await transaction.birthdayTable.updateMany({
-          where: {
-            tableNumber,
-            occupiedSeats: {
-              lte: 6 - totalPartySize,
-            },
-          },
-          data: {
-            occupiedSeats: {
-              increment: totalPartySize,
-            },
-          },
-        });
-
-      if (updatedTable.count === 1) {
-        return tableNumber;
-      }
-    }
-
-    throw new Error("NO_TABLE_AVAILABLE");
-  },
-  {
-    maxWait: 15000,
-    timeout: 30000,
-  }
-);
-
-    }
-
+    /*
+     * Save the RSVP
+     */
     const rsvp = await prisma.rSVP.create({
       data: {
         fullName,
@@ -240,7 +302,7 @@ export async function POST(request: Request) {
         guestsBringing: safeGuestsBringing,
         totalPartySize,
         allocatedTable,
-        message: message || null,
+        message,
       },
     });
 
@@ -297,8 +359,8 @@ export async function POST(request: Request) {
         `;
 
     /*
-      Email sent to the birthday celebrant.
-    */
+     * Email sent to the birthday celebrant
+     */
     await sendEmail({
       to: RSVP_RECEIVER_EMAIL,
       subject: `New Birthday RSVP — ${fullName}`,
@@ -380,16 +442,10 @@ export async function POST(request: Request) {
                 }
               </p>
 
-              ${
-                message
-                  ? `
-                    <p>
-                      <strong>Message:</strong><br />
-                      ${escapeHtml(message)}
-                    </p>
-                  `
-                  : ""
-              }
+              <p>
+                <strong>Message:</strong><br />
+                ${escapeHtml(message)}
+              </p>
 
               <hr />
 
@@ -409,8 +465,8 @@ export async function POST(request: Request) {
     });
 
     /*
-      Confirmation email sent to the guest.
-    */
+     * Confirmation email sent to the guest
+     */
     await sendEmail({
       to: email,
       subject: "Your Birthday RSVP Confirmation 🎉",
@@ -448,12 +504,10 @@ export async function POST(request: Request) {
               </p>
 
               <p>
-                <strong>Date:</strong>
-                October 3rd, 2026
+                <strong>Date:</strong> October 3rd, 2026
                 <br />
 
-                <strong>Time:</strong>
-                3:00 PM
+                <strong>Time:</strong> 3:00 PM
                 <br />
 
                 <strong>Venue:</strong>
